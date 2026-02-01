@@ -9,9 +9,14 @@ const app = express();
 const PORT = process.env.PORT || 4004;
 
 // Middleware
+const allowedOrigins = (process.env.CORS_ORIGINS || "https://microservices-ecom.vercel.app,http://localhost:3000,http://localhost:3001")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(
   cors({
-    origin: ["http://localhost:3000", "http://localhost:3001"],
+    origin: allowedOrigins,
     credentials: true,
   })
 );
