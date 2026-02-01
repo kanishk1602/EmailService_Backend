@@ -52,10 +52,48 @@ const kafka = new Kafka(kafkaConfig);
 const producer = kafka.producer();
 const consumer = kafka.consumer({ groupId: "email-service" });
 
-// --- Email sending function using Resend API (works on Render) ---
-// Falls back to nodemailer SMTP for local development
+// --- Email sending function ---
+// Supports: Brevo (recommended), Resend, and SMTP fallback
 async function sendMail(to, subject, text, html) {
-  // Use Resend API if RESEND_API_KEY is set (recommended for cloud deployment)
+  // Option 1: Brevo API (recommended - can send to anyone on free tier)
+  if (process.env.BREVO_API_KEY) {
+    try {
+      console.log(`Sending email via Brevo API to: ${to}`);
+      const response = await fetch("https://api.brevo.com/v3/smtp/email", {
+        method: "POST",
+        headers: {
+          "accept": "application/json",
+          "api-key": process.env.BREVO_API_KEY,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          sender: {
+            name: process.env.EMAIL_FROM_NAME || "ShopEase",
+            email: process.env.EMAIL_FROM || "noreply@shopease.com",
+          },
+          to: [{ email: to }],
+          subject: subject,
+          htmlContent: html || `<p>${text}</p>`,
+          textContent: text,
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        console.error("Brevo API error:", data);
+        return false;
+      }
+      
+      console.log(`Email sent successfully via Brevo to ${to}. MessageId: ${data.messageId}`);
+      return true;
+    } catch (error) {
+      console.error("Failed to send email via Brevo:", error);
+      return false;
+    }
+  }
+
+  // Option 2: Resend API (requires verified domain for sending to others)
   if (process.env.RESEND_API_KEY) {
     try {
       console.log(`Sending email via Resend API to: ${to}`);
@@ -89,7 +127,7 @@ async function sendMail(to, subject, text, html) {
     }
   }
 
-  // Fallback to SMTP (for local development)
+  // Option 3: SMTP (for local development only - blocked on cloud platforms)
   if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
     try {
       const nodemailer = await import("nodemailer");
@@ -101,7 +139,7 @@ async function sendMail(to, subject, text, html) {
           user: process.env.SMTP_USER,
           pass: process.env.SMTP_PASS,
         },
-        connectionTimeout: 10000, // 10 second timeout
+        connectionTimeout: 10000,
       });
 
       console.log(`Sending email via SMTP to: ${to}`);
@@ -124,27 +162,33 @@ async function sendMail(to, subject, text, html) {
   console.log(`[MOCK] Email would be sent to: ${to}`);
   console.log(`[MOCK] Subject: ${subject}`);
   console.log(`[MOCK] Text: ${text}`);
-  return true; // Return true for mock mode
+  return true;
 }
 
 // Health check endpoint
 app.get("/health", (req, res) => {
+  const emailProvider = process.env.BREVO_API_KEY ? "Brevo" : 
+                        process.env.RESEND_API_KEY ? "Resend" : 
+                        process.env.SMTP_HOST ? "SMTP" : "Mock";
   res.json({
     status: "OK",
     service: "Email Service",
     port: PORT,
-    emailProvider: process.env.RESEND_API_KEY ? "Resend" : (process.env.SMTP_HOST ? "SMTP" : "Mock"),
+    emailProvider,
     timestamp: new Date().toISOString(),
   });
 });
 
 // Get service info
 app.get("/", (req, res) => {
+  const emailProvider = process.env.BREVO_API_KEY ? "Brevo" : 
+                        process.env.RESEND_API_KEY ? "Resend" : 
+                        process.env.SMTP_HOST ? "SMTP" : "Mock";
   res.json({
     service: "Email Service",
     version: "1.0.0",
     port: PORT,
-    emailProvider: process.env.RESEND_API_KEY ? "Resend" : (process.env.SMTP_HOST ? "SMTP" : "Mock"),
+    emailProvider,
     endpoints: {
       health: "/health",
       sendEmail: "/api/send-email (POST)",
