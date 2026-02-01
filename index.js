@@ -14,12 +14,17 @@ const allowedOrigins = (process.env.CORS_ORIGINS || "https://microservices-ecom.
   .map((o) => o.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-  })
-);
+const corsOptions = {
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+};
+
+app.use(cors(corsOptions));
+// Explicitly handle preflight requests for all routes
+app.options("*", cors(corsOptions));
+
 app.use(express.json());
 
 // Kafka configuration - supports both local and cloud (Upstash/Confluent)
