@@ -52,12 +52,88 @@ const kafka = new Kafka(kafkaConfig);
 const producer = kafka.producer();
 const consumer = kafka.consumer({ groupId: "email-service" });
 
+// --- Email sending function using Resend API (works on Render) ---
+// Falls back to nodemailer SMTP for local development
+async function sendMail(to, subject, text, html) {
+  // Use Resend API if RESEND_API_KEY is set (recommended for cloud deployment)
+  if (process.env.RESEND_API_KEY) {
+    try {
+      console.log(`Sending email via Resend API to: ${to}`);
+      const response = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${process.env.RESEND_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: process.env.EMAIL_FROM || "onboarding@resend.dev",
+          to: to,
+          subject: subject,
+          text: text,
+          html: html || text,
+        }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error("Resend API error:", errorData);
+        return false;
+      }
+
+      const data = await response.json();
+      console.log(`Email sent successfully via Resend. ID: ${data.id}`);
+      return true;
+    } catch (error) {
+      console.error("Failed to send email via Resend:", error);
+      return false;
+    }
+  }
+
+  // Fallback to SMTP (for local development)
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const nodemailer = await import("nodemailer");
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST,
+        port: parseInt(process.env.SMTP_PORT || "587"),
+        secure: process.env.SMTP_SECURE === "true",
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+        connectionTimeout: 10000, // 10 second timeout
+      });
+
+      console.log(`Sending email via SMTP to: ${to}`);
+      await transporter.sendMail({
+        from: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to,
+        subject,
+        text,
+        html: html || text,
+      });
+      console.log(`Email sent successfully via SMTP to ${to}`);
+      return true;
+    } catch (error) {
+      console.error("Failed to send email via SMTP:", error.message);
+      return false;
+    }
+  }
+
+  // No email provider configured - log only
+  console.log(`[MOCK] Email would be sent to: ${to}`);
+  console.log(`[MOCK] Subject: ${subject}`);
+  console.log(`[MOCK] Text: ${text}`);
+  return true; // Return true for mock mode
+}
+
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.json({
     status: "OK",
     service: "Email Service",
     port: PORT,
+    emailProvider: process.env.RESEND_API_KEY ? "Resend" : (process.env.SMTP_HOST ? "SMTP" : "Mock"),
     timestamp: new Date().toISOString(),
   });
 });
@@ -68,6 +144,7 @@ app.get("/", (req, res) => {
     service: "Email Service",
     version: "1.0.0",
     port: PORT,
+    emailProvider: process.env.RESEND_API_KEY ? "Resend" : (process.env.SMTP_HOST ? "SMTP" : "Mock"),
     endpoints: {
       health: "/health",
       sendEmail: "/api/send-email (POST)",
@@ -85,21 +162,21 @@ app.post("/api/send-email", async (req, res) => {
       return res.status(400).json({ error: "To and subject are required" });
     }
 
-    // For now, just log the email (mock implementation)
-    console.log(`Email would be sent to: ${to}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Text: ${text || "No text content"}`);
+    const sent = await sendMail(to, subject, text, html);
 
-    // In a real implementation, you would use nodemailer or similar
-    // const transporter = nodemailer.createTransporter({...});
-    // await transporter.sendMail({ to, subject, text, html });
-
-    res.json({
-      success: true,
-      message: "Email sent successfully (mock)",
-      to,
-      subject,
-    });
+    if (sent) {
+      res.json({
+        success: true,
+        message: "Email sent successfully",
+        to,
+        subject,
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: "Failed to send email",
+      });
+    }
   } catch (error) {
     console.error("Error sending email:", error);
     res.status(500).json({
@@ -115,35 +192,6 @@ const run = async () => {
     await producer.connect();
     await consumer.connect();
 
-    // --- Nodemailer setup ---
-    const nodemailer = await import("nodemailer");
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: process.env.SMTP_PORT,
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    });
-
-    async function sendMail(to, subject, text) {
-      try {
-        console.log(`Attempting to send email to: ${to}`);
-        await transporter.sendMail({
-          from: process.env.SMTP_FROM || process.env.SMTP_USER,
-          to,
-          subject,
-          text,
-        });
-        console.log(`Email sent successfully to ${to}`);
-        return true;
-      } catch (e) {
-        console.error("Failed to send email:", e);
-        return false;
-      }
-    }
-
     // Subscribe to email-related topics
     await consumer.subscribe({ topic: "send-email", fromBeginning: true });
 
@@ -158,7 +206,7 @@ const run = async () => {
           return;
         }
 
-        const { to, subject, text, type } = payload;
+        const { to, subject, text, html, type } = payload;
 
         if (topic === "send-email") {
           if (!to || !subject) {
@@ -167,7 +215,7 @@ const run = async () => {
           }
 
           console.log(`Processing email: type=${type}, to=${to}`);
-          const sent = await sendMail(to, subject, text || "");
+          const sent = await sendMail(to, subject, text, html);
           
           if (sent) {
             // Optionally publish email-sent confirmation event
@@ -188,12 +236,16 @@ const run = async () => {
       },
     });
 
+    // Log email provider status
+    const emailProvider = process.env.RESEND_API_KEY ? "Resend API" : (process.env.SMTP_HOST ? "SMTP" : "Mock (no provider configured)");
+    
     // Start Express server
     app.listen(PORT, () => {
       console.log(`🚀 Email Service running on port ${PORT}`);
+      console.log(`📧 Email provider: ${emailProvider}`);
       console.log(`📊 Health check: http://localhost:${PORT}/health`);
       console.log(`📋 API docs: http://localhost:${PORT}/`);
-      console.log(`📧 Listening to Kafka topic: send-email`);
+      console.log(`📨 Listening to Kafka topic: send-email`);
     });
   } catch (err) {
     console.error("Error starting email service:", err);
